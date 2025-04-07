@@ -1,27 +1,31 @@
 import argparse
 import asyncio
-import aiofiles
-import aiofiles.os
-import aiofiles.ospath
-import os
-from pathlib import Path
-import shutil
 import logging
+import shutil
+from pathlib import Path
+import os
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 semaphore = asyncio.Semaphore(100)
 
 
-async def copy_file(file_path: Path, output_dir: Path):
+async def copy_file(file_path: Path, source_dir: Path, output_dir: Path):
     async with semaphore:
-        extension = file_path.suffix[1:] or 'no_extension'
-        target_dir = output_dir / extension
+        extension = "".join(file_path.suffixes).lstrip('.') or 'no_extension'
+        relative_path = file_path.relative_to(source_dir)
+        target_dir = output_dir / extension / relative_path.parent
 
         target_file = target_dir / file_path.name
 
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: os.makedirs(target_dir, exist_ok=True))
+
+        counter = 1
+        while target_file.exists():
+            target_file = target_dir / f"{file_path.stem}_{counter}{file_path.suffix}"
+            counter += 1
+
         try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: os.makedirs(target_dir, exist_ok=True))
             await loop.run_in_executor(None, shutil.copy2, file_path, target_file)
             logging.info(f"Копійовано: {file_path} -> {target_file}")
         except Exception as e:
@@ -29,13 +33,11 @@ async def copy_file(file_path: Path, output_dir: Path):
 
 
 async def read_folder(source_dir: Path, output_dir: Path):
-    tasks = []
+    loop = asyncio.get_running_loop()
 
-    for root, _, files in os.walk(source_dir):
-        for file in files:
-            full_path = Path(root) / file
-            tasks.append(copy_file(full_path, output_dir))
+    file_paths = await loop.run_in_executor(None, lambda: list(source_dir.rglob("*.*")))
 
+    tasks = [copy_file(file_path, source_dir, output_dir) for file_path in file_paths]
     await asyncio.gather(*tasks)
 
 
@@ -52,10 +54,11 @@ async def main():
         logging.error(f"Вихідна папка не існує: {source_folder}")
         return
 
-    if not output_folder.exists():
-        await aiofiles.os.mkdir(output_folder)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, lambda: os.makedirs(output_folder, exist_ok=True))
 
     await read_folder(source_folder, output_folder)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
